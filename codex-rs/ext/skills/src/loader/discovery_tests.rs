@@ -66,7 +66,7 @@ async fn discovers_hidden_directory_through_visible_symlink() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ignores_symlinked_skill_files_and_directory_cycles() {
+async fn discovers_symlinked_skill_files_without_following_directory_cycles_forever() {
     let root = TempDir::new().expect("root temp dir");
     let external = TempDir::new().expect("external temp dir");
     write_skill(external.path(), "external");
@@ -97,8 +97,73 @@ async fn ignores_symlinked_skill_files_and_directory_cycles() {
             canonical_uri(root.path())
                 .join("cycle/demo/SKILL.md")
                 .expect("valid skill URI"),
+            canonical_uri(root.path())
+                .join("linked-file/SKILL.md")
+                .expect("linked skill URI"),
         ]
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn file_symlinks_respect_scope_depth_and_hidden_directory_limits() {
+    let root = TempDir::new().expect("root temp dir");
+    let external = TempDir::new().expect("external temp dir");
+    write_skill(external.path(), "source");
+    for directory in ["visible", ".hidden", "d0/d1/d2/d3/d4/d5/d6"] {
+        fs::create_dir_all(root.path().join(directory)).expect("create skill directory");
+        std::os::unix::fs::symlink(
+            external.path().join("source/SKILL.md"),
+            root.path().join(directory).join("SKILL.md"),
+        )
+        .expect("link skill document");
+    }
+    fs::create_dir_all(root.path().join("broken")).expect("create broken skill directory");
+    std::os::unix::fs::symlink(
+        external.path().join("missing.md"),
+        root.path().join("broken/SKILL.md"),
+    )
+    .expect("link missing document");
+
+    for (policy, mode, expected) in [
+        (
+            DirectorySymlinkPolicy::Follow,
+            SkillDiscoveryMode::Recursive,
+            vec!["visible/SKILL.md"],
+        ),
+        (
+            DirectorySymlinkPolicy::Follow,
+            SkillDiscoveryMode::DirectChildren,
+            vec!["visible/SKILL.md"],
+        ),
+        (
+            DirectorySymlinkPolicy::Ignore,
+            SkillDiscoveryMode::Recursive,
+            vec![],
+        ),
+    ] {
+        let discovery = discover_skills(
+            &FileSystemEnvironmentAccessor::unrestricted(&LOCAL_FS),
+            &canonical_uri(root.path()),
+            SkillDiscoveryOptions {
+                directory_symlinks: policy,
+                hidden_directories: HiddenDirectoryPolicy::Skip,
+                mode,
+            },
+        )
+        .await;
+        assert_eq!(
+            discovery
+                .skills
+                .into_iter()
+                .map(|skill| skill.path)
+                .collect::<Vec<_>>(),
+            expected
+                .into_iter()
+                .map(|path| canonical_uri(root.path()).join(path).unwrap())
+                .collect::<Vec<_>>()
+        );
+    }
 }
 
 #[tokio::test]

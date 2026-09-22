@@ -2,11 +2,13 @@ use std::collections::HashSet;
 use std::io;
 
 use codex_exec_server::EnvironmentAccess;
+use codex_exec_server::GetMetadataOptions;
 use codex_exec_server::WalkEntryKind;
 use codex_exec_server::WalkOptions;
 use codex_utils_path_uri::PathUri;
 use codex_utils_plugins::DISCOVERABLE_PLUGIN_MANIFEST_PATHS;
 use codex_utils_plugins::SkillDiscoveryMode;
+use futures::StreamExt;
 
 use super::MAX_SCAN_DEPTH;
 use super::MAX_SKILLS_DIRS_PER_ROOT;
@@ -117,12 +119,32 @@ pub(super) async fn discover_skills(
     let mut file_paths = HashSet::new();
     let mut metadata_directory_parents = HashSet::new();
     let mut plugin_roots = HashSet::new();
+    let mut skill_directories = Vec::new();
+    if options.mode == SkillDiscoveryMode::Recursive {
+        skill_directories.push(root.clone());
+    }
     for entry in walk.entries {
         if skip_hidden && has_hidden_ancestor_below_root(&entry.path, root) {
             continue;
         }
         match entry.kind {
             WalkEntryKind::Directory => {
+                let depth = std::iter::successors(
+                    Some(entry.path.clone()),
+                    codex_utils_path_uri::PathUri::parent,
+                )
+                .take_while(|path| path != root)
+                .count();
+                if (!skip_hidden
+                    || !entry
+                        .path
+                        .basename()
+                        .is_some_and(|name| name.starts_with('.')))
+                    && ((options.mode == SkillDiscoveryMode::Recursive && depth <= MAX_SCAN_DEPTH)
+                        || (options.mode == SkillDiscoveryMode::DirectChildren && depth == 1))
+                {
+                    skill_directories.push(entry.path.clone());
+                }
                 if entry
                     .path
                     .basename()
@@ -152,6 +174,31 @@ pub(super) async fn discover_skills(
                 {
                     skill_files.push(entry.path);
                 }
+            }
+        }
+    }
+    // Walk inventories omit file symlinks. Probe only missing skill documents in
+    // eligible directories, using the same filesystem authority and bounded concurrency.
+    // Do not extend a scan that has already exhausted its traversal budget.
+    if !walk.truncated && matches!(options.directory_symlinks, DirectorySymlinkPolicy::Follow) {
+        let candidates = skill_directories
+            .into_iter()
+            .filter_map(|directory| directory.join(SKILLS_FILENAME).ok())
+            .filter(|path| !file_paths.contains(path));
+        let mut probes = futures::stream::iter(candidates)
+            .map(|path| async move {
+                let metadata = file_system
+                    .get_metadata(&path, GetMetadataOptions::default())
+                    .await;
+                (path, metadata)
+            })
+            .buffered(MAX_CONCURRENT_SKILL_LOADS);
+        while let Some((path, metadata)) = probes.next().await {
+            match metadata {
+                Ok(metadata) if metadata.is_file => skill_files.push(path),
+                Ok(_) => {}
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => warnings.push(format!("failed to scan skill path {path}: {error}")),
             }
         }
     }
