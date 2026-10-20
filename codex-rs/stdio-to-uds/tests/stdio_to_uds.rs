@@ -155,3 +155,43 @@ async fn pipes_stdin_and_stdout_through_socket() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[tokio::test]
+async fn json_rpc_proxy_exits_when_daemon_closes_with_stdin_still_open() -> anyhow::Result<()> {
+    let dir = tempfile::TempDir::new()?;
+    let socket_path = dir.path().join("socket");
+    let mut listener = UnixListener::bind(&socket_path).await?;
+    let mut child = Command::new(codex_utils_cargo_bin::cargo_bin("codex-stdio-to-uds")?)
+        .arg("--json-rpc")
+        .arg(&socket_path)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    // Keep the parent writer open: shutdown must not depend on stdin reaching EOF.
+    let _stdin = child.stdin.take().context("missing child stdin")?;
+    let waiter = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if child.try_wait()?.is_some() {
+                return Ok(child.wait_with_output()?);
+            }
+            if Instant::now() >= deadline {
+                child.kill()?;
+                let output = child.wait_with_output()?;
+                anyhow::bail!(
+                    "proxy hung after daemon closed: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    });
+    let connection = listener.accept().await?;
+    let mut websocket = tokio_tungstenite::accept_async(connection).await?;
+    websocket.close(None).await?;
+    let output = waiter.await??;
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("shared app-server disconnected"));
+    Ok(())
+}

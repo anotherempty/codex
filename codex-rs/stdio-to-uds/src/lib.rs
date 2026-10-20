@@ -44,3 +44,6 @@ pub async fn run(socket_path: &Path) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+mod json_rpc;
+pub use json_rpc::run_json_rpc;

@@ -4761,11 +4761,16 @@ name = "codex-stdio-to-uds"
 version = "0.0.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "codex-uds",
  "codex-utils-cargo-bin",
+ "futures",
  "pretty_assertions",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
 ]
 
 [[package]]

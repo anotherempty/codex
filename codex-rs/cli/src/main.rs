@@ -700,6 +700,10 @@ enum AppServerDaemonSubcommand {
 
 #[derive(Debug, Args)]
 struct AppServerProxyCommand {
+    /// Adapt newline-delimited JSON-RPC to the daemon WebSocket protocol.
+    #[arg(long)]
+    json_rpc: bool,
+
     /// Path to the app-server Unix domain socket to connect to.
     #[arg(long = "sock", value_name = "SOCKET_PATH", value_parser = parse_socket_path)]
     socket_path: Option<AbsolutePathBuf>,
@@ -1464,7 +1468,11 @@ async fn cli_main(
                             codex_app_server::app_server_control_socket_path(&codex_home)?
                         }
                     };
-                    codex_stdio_to_uds::run(socket_path.as_path()).await?;
+                    if proxy_cli.json_rpc {
+                        codex_stdio_to_uds::run_json_rpc(socket_path.as_path()).await?;
+                    } else {
+                        codex_stdio_to_uds::run(socket_path.as_path()).await?;
+                    }
                 }
                 Some(AppServerSubcommand::GenerateTs(gen_cli)) => {
                     let options = codex_app_server_protocol::GenerateTsOptions {
