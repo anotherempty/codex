@@ -151,3 +151,28 @@ commands above use a 16 MiB test-thread stack and completed successfully.
 checks also passed. Dependency-inclusive strict Clippy is blocked by an existing
 `clippy::let_and_return` warning in unchanged
 `app-server/src/message_processor.rs:382`; that unrelated source was not edited.
+
+## Integration and ownership contract
+
+The VS Code integration is blocked on the extension source, which is not in this
+checkout. Its launch path must select a compatible shared backend before any
+thread request, initialize each new connection, and resume the same thread after
+transport loss. It must not retry an uncertain `turn/start` without reconciling
+server state. The bridge is ready for that launch path; modifying an installed
+minified extension would not deliver a repository fix for all installations.
+
+A permanently live private owner cannot be distinguished from a legitimate
+client using only its lock. The server cannot infer an SSH disconnect when the
+extension host and its stdio connection remain alive. Automatic eviction would
+require an explicit ownership/lease or cooperative handoff protocol, supported
+by both clients and servers, including active turns and approvals. Lock deletion,
+PID-age thresholds, and timeout-based killing are not valid replacements.
+Migration must wait for the private owner to finish and exit before attaching
+that thread to the shared backend. New clients should share the backend from
+startup so a surviving extension host cannot become a competing writer.
+
+SDK shared mode must be explicit. Launch configuration and environment belong to
+the server, not the attaching process. Closing a connection detaches it; cancelling
+a turn requires `turn/interrupt`. A lost connection is not permission to replay
+mutating requests. A replacement client must initialize and resume the recorded
+thread ID, inspecting its active turn before submitting further work.
