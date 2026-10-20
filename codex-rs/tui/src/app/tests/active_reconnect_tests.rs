@@ -29,15 +29,24 @@ async fn reconnect_restores_launch_reviewer_without_a_profile_override() -> Resu
 
 #[tokio::test]
 async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Result<()> {
-    for (recovered_queue, edit_offline, resume_error_code, deferred_notice, notice_enabled) in [
-        (true, false, -32603, false, false),
-        (true, false, -32603, false, true),
-        (false, false, -32603, false, false),
-        (true, true, -32603, false, false),
-        (true, false, -32600, false, false),
-        (false, false, -32600, false, false),
-        (true, true, -32600, false, false),
-        (true, false, -32603, true, true),
+    for (
+        recovered_queue,
+        edit_offline,
+        resume_error_code,
+        deferred_notice,
+        notice_enabled,
+        writer_conflict,
+    ) in [
+        (true, false, -32600, false, false, true),
+        (true, true, -32600, false, false, true),
+        (true, false, -32603, false, false, false),
+        (true, false, -32603, false, true, false),
+        (false, false, -32603, false, false, false),
+        (true, true, -32603, false, false, false),
+        (true, false, -32600, false, false, false),
+        (false, false, -32600, false, false, false),
+        (true, true, -32600, false, false, false),
+        (true, false, -32603, true, true, false),
     ] {
         let pending_profile = !recovered_queue && resume_error_code == -32600;
         let (mut app, mut events, mut ops) = make_test_app_with_channels().await;
@@ -138,7 +147,9 @@ async fn reconnect_restores_history_permissions_and_resumes_unsent_input() -> Re
                 let (stream, _) = listener.accept().await?;
                 methods.extend(serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| std::future::ready(match request.method.as_str() {
                     "thread/resume" if attempt == 0 => Some(json!({"error": {"code": resume_error_code, "message":
-                        if resume_error_code == -32600 {
+                        if writer_conflict {
+                            format!("thread {id} already has an active writer")
+                        } else if resume_error_code == -32600 {
                             format!("thread {id} is closing; retry thread/resume after the thread is closed")
                         } else {
                             "temporarily unavailable".into()
@@ -799,4 +810,56 @@ pub(super) async fn drain_history(
             .flat_map(|cell| cell.transcript_lines(/*width*/ 80))
             .collect::<Vec<_>>(),
     ))
+}
+
+#[tokio::test]
+async fn reconnect_active_writer_conflict_exhausts_budget_without_changing_backend() -> Result<()> {
+    let (app, _, _) = make_test_app_with_channels().await;
+    let id = ThreadId::new();
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let target = AppServerTarget::LocalDaemon {
+        endpoint: crate::resolve_remote_addr(&format!("ws://{}", listener.local_addr()?))?,
+        // Startup permits fallback, but reconnect must never use it.
+        allow_embedded_fallback: true,
+    };
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        serve_reconnect_requests(tokio_tungstenite::accept_async(stream).await?, |request| {
+            assert_eq!(request.method, "thread/resume");
+            std::future::ready(Some(json!({"error": {
+                "code": -32600,
+                "message": format!("thread {id} already has an active writer")
+            }})))
+        })
+        .await
+    });
+    let result = reconnect(
+        crate::backend_id::BackendId::new(),
+        target,
+        app.config.clone(),
+        app.local_settings.clone(),
+        Some(id),
+        None,
+        crate::dynamic_tools_mcp::ThreadToolTransport::Dynamic,
+        ReconnectPresentation::Startup(tokio::time::Instant::now() + Duration::from_millis(750)),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a live writer conflict is not a recovered unavailable thread"
+    );
+    let methods = server.await??;
+    assert_eq!(
+        methods
+            .iter()
+            .filter(|method| *method == "thread/resume")
+            .count(),
+        1
+    );
+    assert!(
+        !methods
+            .iter()
+            .any(|method| method == "thread/start" || method == "turn/start")
+    );
+    Ok(())
 }

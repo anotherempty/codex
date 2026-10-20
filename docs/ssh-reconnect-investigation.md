@@ -106,3 +106,48 @@ does not itself reclaim their resources. Windows and macOS runtime validation
 are still needed; the bridge uses the existing cross-platform `codex-uds` crate.
 
 No upstream issue comment or pull request has been published.
+
+## TUI reconnect follow-up
+
+The interactive CLI already has native shared-daemon discovery and reconnection;
+it does not need the stdio bridge. Resume/fork and picker paths already disable
+embedded fallback after a backend has been selected.
+
+A targeted regression exposed a separate recovery bug: `thread/resume` returns
+`-32600` for both unavailable threads and active writer conflicts. Reconnect
+previously treated the conflict as a successfully recovered but unavailable
+conversation. It stopped retrying even if the original writer was about to
+release ownership.
+
+The TUI now retries active-writer conflicts for the selected conversation within
+its existing retry budget. It preserves drafts, queued input, and backend
+identity. A writer that never releases ownership leaves the client offline when
+the budget expires; no writer is killed, no lock is deleted, and no replacement
+thread is created. Command-center overview recovery can still succeed without
+its optional selected conversation.
+
+Regression cases cover a temporary conflict with queued and edited input, plus
+an exhausted retry budget with embedded fallback nominally enabled. The latter
+asserts that no `thread/start` or `turn/start` is sent.
+
+Run the relevant TUI checks with enough stack for the large existing test futures:
+
+```sh
+cd codex-rs
+RUST_MIN_STACK=16777216 cargo test -p codex-tui --lib reconnect
+RUST_MIN_STACK=16777216 cargo test -p codex-tui --lib fallback
+```
+
+This does not change `codex exec` or either SDK. `exec` owns an embedded server and
+its cancellation contract; TypeScript wraps `exec`, while Python owns a stdio
+server. Shared-backend modes for those clients need separate lifecycle design.
+
+Validation on Linux: both new conflict regressions failed before the TUI patch;
+afterward all 24 reconnect tests and 78 fallback-filtered tests passed. The
+initial default-stack test run aborted in an existing large test future; the
+commands above use a 16 MiB test-thread stack and completed successfully.
+
+`cargo clippy --no-deps -p codex-tui --lib --tests -- -D warnings` and formatting
+checks also passed. Dependency-inclusive strict Clippy is blocked by an existing
+`clippy::let_and_return` warning in unchanged
+`app-server/src/message_processor.rs:382`; that unrelated source was not edited.

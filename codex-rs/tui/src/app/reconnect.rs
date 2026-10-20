@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::app_server_session::ResumeModelSettings;
+use crate::app_server_session::is_active_writer_error;
 use crate::dynamic_tools_mcp::ThreadToolTransport;
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -90,14 +91,18 @@ pub(super) async fn reconnect(
                     {
                         return Err(error);
                     }
-                    // Unloading threads use the same code as unavailable conversations, but
-                    // ordinary resume can reattach once the unload finishes.
+                    // Closing threads and live writer conflicts share the unavailable-thread
+                    // error code. Keep the selected conversation offline and retry within the
+                    // existing budget: its owner may finish releasing the writer meanwhile.
+                    // The overview can still recover without its optional selected thread.
                     Err(error)
                         if matches!(
                             error.downcast_ref::<TypedRequestError>(),
                             Some(TypedRequestError::Server { method, source })
                                 if method == "thread/resume" && source.code == -32600
-                                    && source.message.starts_with(&format!("thread {thread_id} is closing;"))
+                                    && (source.message.starts_with(&format!("thread {thread_id} is closing;"))
+                                        || (presentation != ReconnectPresentation::Overview
+                                            && is_active_writer_error(&error)))
                         ) =>
                     {
                         return Err(error);
