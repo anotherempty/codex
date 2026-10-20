@@ -73,3 +73,39 @@ Use Python's standard `help(openai_codex)`, `help(Codex)`, or
 
 The package is licensed under the
 [repository Apache License 2.0](https://github.com/openai/codex/blob/main/LICENSE).
+
+### Connect to an existing shared app-server (experimental)
+
+A CLI built from this branch can attach the SDK to an already running local
+app-server using the JSON-RPC proxy:
+
+```python
+from openai_codex import Codex, CodexConfig
+
+config = CodexConfig(
+    codex_bin="/absolute/path/to/fork/codex",
+    app_server_socket="/absolute/private/directory/server.sock",
+)
+with Codex(config=config) as codex:
+    thread = codex.thread_resume("saved-thread-id")
+```
+
+The same configuration works with `AsyncCodex`. Provision the compatible server
+separately (`codex app-server --listen unix:///absolute/private/directory/server.sock`).
+This option does not start a server, fall back to a private server, or change its
+configuration. It requires this branch's `app-server proxy --json-rpc` support;
+the published pinned runtime does not provide that new flag.
+
+The server owns credentials, environment, execution host, and configuration.
+`env`, `config_overrides`, and `launch_args_override` are rejected with
+`app_server_socket` rather than silently ignored. `cwd` sets the proxy process's
+working directory; use thread parameters to select the thread working directory.
+The socket path must be absolute.
+
+Closing the SDK terminates only its proxy and detaches the connection. Active
+turns continue on the server. Use explicit turn cancellation to interrupt work.
+On connection loss, pending calls fail; create a **new** SDK instance, initialize
+it (the public `Codex` API does this automatically), and resume the saved thread
+ID. Inspect its current turn before submitting more work. Requests are never
+automatically replayed, and existing iterators do not survive replacement of the
+client. Do not use this mode when you require process death to cancel execution.

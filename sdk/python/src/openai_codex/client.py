@@ -209,6 +209,8 @@ class CodexConfig:
     client_title: str = "Codex Python SDK"
     client_version: str = SDK_VERSION
     experimental_api: bool = True
+    # Opt in to an existing server. Requires a CLI with JSON-RPC proxy support.
+    app_server_socket: str | None = None
 
 
 class CodexClient:
@@ -243,6 +245,17 @@ class CodexClient:
         if self._proc is not None:
             return
 
+        if self.config.app_server_socket is not None:
+            if not Path(self.config.app_server_socket).is_absolute():
+                raise ValueError("app_server_socket must be an absolute path")
+            if self.config.launch_args_override is not None:
+                raise ValueError("app_server_socket cannot be combined with launch_args_override")
+            if self.config.config_overrides or self.config.env is not None:
+                raise ValueError(
+                    "app_server_socket uses the server's configuration and environment; "
+                    "config_overrides and env are not supported"
+                )
+
         path_dirs: tuple[Path, ...] = ()
         if self.config.launch_args_override is not None:
             args = list(self.config.launch_args_override)
@@ -253,14 +266,19 @@ class CodexClient:
             args = [str(codex_bin)]
             for kv in self.config.config_overrides:
                 args.extend(["--config", kv])
-            args.extend(["app-server", "--listen", "stdio://"])
+            if self.config.app_server_socket is not None:
+                args.extend(
+                    ["app-server", "proxy", "--json-rpc", "--sock", self.config.app_server_socket]
+                )
+            else:
+                args.extend(["app-server", "--listen", "stdio://"])
 
         env = os.environ.copy()
         if self.config.env:
             env.update(self.config.env)
         _prepend_path_dirs(env, path_dirs)
 
-        if self.config.launch_args_override is None:
+        if self.config.launch_args_override is None and self.config.app_server_socket is None:
             self._checkout_capabilities = CheckoutCapabilities(
                 command=tuple(args[:-2]), cwd=self.config.cwd, env=env.copy()
             )

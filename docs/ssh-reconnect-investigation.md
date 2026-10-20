@@ -176,3 +176,21 @@ the server, not the attaching process. Closing a connection detaches it; cancell
 a turn requires `turn/interrupt`. A lost connection is not permission to replay
 mutating requests. A replacement client must initialize and resume the recorded
 thread ID, inspecting its active turn before submitting further work.
+
+## Python SDK shared attachment
+
+`CodexConfig.app_server_socket` opts sync and async clients into the JSON-RPC
+proxy. The default private stdio launch remains unchanged. The new option rejects
+relative socket paths and conflicting launch/environment/configuration overrides.
+Unversioned shared backends cannot be schema-probed through the proxy executable;
+the existing feature-version checks fail closed instead of inspecting the wrong
+runtime. Reconnect uses a new client instance; no uncertain requests are replayed.
+
+Validation: 91 Python unit tests passed, plus Ruff checks. The credential-free
+integration script now accepts `--python-sdk`; with SDK dependencies installed,
+its ten checks cover both Python clients resuming the same live turn, detachment
+without cancellation, and explicit interruption without stopping the daemon, in
+addition to the existing bridge/approval regressions. It uses the installed
+backend and a CLI-shaped launcher for the fork-built standalone bridge, not a
+freshly built complete Codex executable. No real IDE network interruption or
+Windows/macOS runtime check is implied by these Linux results.

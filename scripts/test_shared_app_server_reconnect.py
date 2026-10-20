@@ -6,6 +6,8 @@ bridge. Intended for Linux/macOS environments with Unix socket support.
 """
 
 import argparse
+import asyncio
+import sys
 import http.server
 import json
 import os
@@ -19,6 +21,7 @@ import time
 parser = argparse.ArgumentParser(description='Exercise shared app-server reconnect through the JSON-RPC bridge using a local mock model.')
 parser.add_argument('--codex', required=True, help='Codex executable with app-server Unix socket support')
 parser.add_argument('--bridge', required=True, help='Built codex-stdio-to-uds executable')
+parser.add_argument('--python-sdk', action='store_true', help='Also exercise the checkout Python SDK (requires its dependencies)')
 args = parser.parse_args()
 B = str(pathlib.Path(args.codex).resolve())
 bridge = str(pathlib.Path(args.bridge).resolve())
@@ -33,17 +36,21 @@ class Mock(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.rfile.read(int(self.headers.get('Content-Length', 0)))
+        mock_event = mock_events.get_nowait() if not mock_events.empty() else None
         entered.set()
         gate.wait(60)
         self.send_response(200)
         self.send_header('Content-Type', 'text/event-stream')
         self.end_headers()
         events = [{'type': 'response.created', 'response': {'id': 'resp_test'}}, {'type': 'response.completed', 'response': {'id': 'resp_test', 'status': 'completed', 'output': [], 'usage': {'input_tokens': 1, 'output_tokens': 0, 'total_tokens': 1}}}]
-        if not mock_events.empty():
-            events.insert(1, mock_events.get_nowait())
+        if mock_event is not None:
+            events.insert(1, mock_event)
         for event in events:
-            self.wfile.write(('event: ' + event['type'] + '\ndata: ' + json.dumps(event) + '\n\n').encode())
-            self.wfile.flush()
+            try:
+                self.wfile.write(('event: ' + event['type'] + '\ndata: ' + json.dumps(event) + '\n\n').encode())
+                self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                break
 
 class Client:
 
@@ -153,6 +160,44 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
             r = c.rpc('thread/resume', {'threadId': tid})
             assert 'result' in r, r
         print('PASS: five successive bridge reconnects', flush=True)
+        if args.python_sdk:
+            sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "sdk/python/src"))
+            from openai_codex.client import CodexClient, CodexConfig
+            from openai_codex.async_client import AsyncCodexClient
+
+            # Use the built standalone bridge through a CLI-shaped fixture. The
+            # installed backend predates the fork's `proxy --json-rpc` flag.
+            launcher = pathlib.Path(tmp, "proxy-cli")
+            launcher.write_text(
+                "#!" + sys.executable + "\nimport os, sys\n"
+                "assert sys.argv[1:5] == ['app-server', 'proxy', '--json-rpc', '--sock']\n"
+                + "os.execv(" + repr(bridge) + ", [" + repr(bridge)
+                + ", '--json-rpc', sys.argv[5]])\n"
+            )
+            launcher.chmod(0o700)
+            sdk_config = CodexConfig(codex_bin=str(launcher), app_server_socket=tmp + '/shared.sock')
+            for _ in range(2):
+                with CodexClient(sdk_config) as sdk:
+                    sdk.initialize()
+                    resumed = sdk.thread_resume(tid)
+                    assert resumed.thread.id == tid
+                    assert any(t.id == turn and t.status.value == 'inProgress' for t in resumed.thread.turns)
+                assert servers[0].poll() is None
+            print('PASS: Python SDK reconnects using fresh clients; close preserves active turn', flush=True)
+
+            async def async_resume():
+                sdk = AsyncCodexClient(sdk_config)
+                await sdk.start()
+                try:
+                    await sdk.initialize()
+                    resumed = await sdk.thread_resume(tid)
+                    assert resumed.thread.id == tid
+                    assert any(t.id == turn and t.status.value == 'inProgress' for t in resumed.thread.turns)
+                finally:
+                    await sdk.close()
+            asyncio.run(async_resume())
+            assert servers[0].poll() is None
+            print('PASS: async Python SDK attaches and detaches without cancelling turn', flush=True)
         gate.set()
         for _ in range(50):
             r = c.rpc('thread/read', {'threadId': tid, 'includeTurns': True})
@@ -162,6 +207,27 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
         else:
             raise AssertionError(r)
         print('PASS: original turn completes after reconnect', flush=True)
+        if args.python_sdk:
+            gate.clear()
+            entered.clear()
+            started = c.rpc('turn/start', {'threadId': tid, 'input': [{'type': 'text', 'text': 'cancel test', 'text_elements': []}]})
+            assert 'result' in started, started
+            cancel_turn = started['result']['turn']['id']
+            assert entered.wait(15), 'cancellable mock request never arrived'
+            with CodexClient(sdk_config) as sdk:
+                sdk.initialize()
+                sdk.thread_resume(tid)
+                sdk.turn_interrupt(tid, cancel_turn)
+                for _ in range(100):
+                    state = sdk.thread_read(tid, include_turns=True)
+                    if any(t.id == cancel_turn and t.status.value == 'interrupted' for t in state.thread.turns):
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError('explicit SDK cancellation did not interrupt the turn')
+            assert servers[0].poll() is None
+            gate.set()
+            print('PASS: explicit Python SDK cancellation interrupts only its selected turn', flush=True)
         mock_events.put({"type": "response.output_item.done", "item": {
             "type": "function_call", "call_id": "approval-test", "name": "exec_command",
             "arguments": json.dumps({"cmd": "echo approval-test", "sandbox_permissions": "require_escalated", "justification": "Mock approval regression"})}})
