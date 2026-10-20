@@ -17,17 +17,18 @@ from openai_codex.client import CodexClient, CodexConfig
         ({"env": {}}, "configuration and environment"),
     ],
 )
-def test_shared_backend_rejects_ignored_launch_options(monkeypatch, options, message):
+def test_shared_backend_rejects_ignored_launch_options(monkeypatch, tmp_path, options, message):
     spawn = Mock()
     monkeypatch.setattr("openai_codex.client.subprocess.Popen", spawn)
-    config = CodexConfig(**{"app_server_socket": "/private/server.sock", **options})
+    config = CodexConfig(**{"app_server_socket": str(tmp_path / "server.sock"), **options})
     with pytest.raises(ValueError, match=message):
         CodexClient(config).start()
     spawn.assert_not_called()
 
 
-@pytest.mark.parametrize("socket", [None, "/private/server.sock"])
-def test_backend_selection_and_proxy_only_shutdown(monkeypatch, socket):
+@pytest.mark.parametrize("shared", [False, True])
+def test_backend_selection_and_proxy_only_shutdown(monkeypatch, tmp_path, shared):
+    socket = str(tmp_path / "server.sock") if shared else None
     proc = Mock()
     spawn = Mock(return_value=proc)
     monkeypatch.setattr("openai_codex.client.subprocess.Popen", spawn)

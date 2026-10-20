@@ -1,0 +1,39 @@
+name: shared-app-server-transport
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "codex-rs/stdio-to-uds/**"
+      - "codex-rs/uds/**"
+      - "codex-rs/Cargo.lock"
+      - ".github/workflows/shared-app-server-transport.yml"
+  pull_request:
+    paths:
+      - "codex-rs/stdio-to-uds/**"
+      - "codex-rs/uds/**"
+      - "codex-rs/Cargo.lock"
+      - ".github/workflows/shared-app-server-transport.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  bridge:
+    name: Bridge (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-14, windows-2022]
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - name: Test JSON-RPC and existing byte transports
+        run: cargo test --locked -p codex-stdio-to-uds -- --nocapture

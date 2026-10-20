@@ -246,3 +246,31 @@ interruption, backend-loss failure, public TypeScript SDK completion, and actual
 AbortSignal cancellation verified against server-side turn state. The temporary
 CLI-shaped launcher delegates to the built `codex-exec`; this validates the real
 SDK/exec path without claiming the installed Codex CLI has the new flag.
+
+## SSH and platform validation
+
+Run `scripts/test_ssh_app_server_reconnect.py` on the SSH client host with
+`--host <ssh-alias> --codex <remote-codex-path> --bridge <remote-built-bridge-path>`.
+It creates a disposable backend and loopback mock model on the remote host through
+an independent control connection. It then opens two real SSH client connections,
+forcibly terminates them, and resumes the same saved thread through three further
+SSH connections. Cleanup stops only the fixture's own backend and removes its
+temporary home. Agent forwarding is disabled.
+
+Both SSH checks passed from macOS to EVO Linux. This is actual SSH-client process
+loss, not a claim of VS Code extension integration, TCP blackhole recovery, or
+machine sleep/wake testing. The backend remains Linux in this test.
+
+The `shared-app-server-transport` workflow runs the bridge's unit and subprocess
+tests on Linux, macOS, and Windows. Those results cover transport behavior, not
+end-to-end SDK/IDE lifecycle behavior on every platform. The Python shared-mode
+unit fixtures now use platform-native absolute socket paths.
+
+Still blocked or unsupported:
+
+- VS Code launch/reconnect integration requires the extension source outside this repository.
+- Permanent private owners require cooperative migration or a client/server ownership protocol;
+  neither live-lock deletion nor forced owner termination is implemented.
+- Native IDE sleep/wake, network blackholes, and full Windows SDK cancellation remain unvalidated.
+  TypeScript shared mode explicitly rejects Windows rather than leaving abort behavior ambiguous.
+- No upstream issue comment or PR has been posted.
