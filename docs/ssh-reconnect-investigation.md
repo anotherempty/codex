@@ -274,3 +274,9 @@ Still blocked or unsupported:
 - Native IDE sleep/wake, network blackholes, and full Windows SDK cancellation remain unvalidated.
   TypeScript shared mode explicitly rejects Windows rather than leaving abort behavior ambiguous.
 - No upstream issue comment or PR has been posted.
+
+Native bridge CI completed successfully on Linux, macOS, and Windows:
+[run 39449222899](https://github.com/anotherempty/codex/actions/runs/39449222899).
+Each platform ran all eight bridge unit/subprocess tests. The workflow tested
+commit `5c7d3eeca6`; subsequent SSH-fixture lint and exec signal-error handling
+changes do not modify the bridge.

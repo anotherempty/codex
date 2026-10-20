@@ -108,17 +108,19 @@ pub(super) fn interrupt_receiver(shared: bool) -> anyhow::Result<mpsc::Unbounded
     let _ = shared;
     tokio::spawn(async move {
         #[cfg(unix)]
-        if let Some(ref mut terminate) = terminate {
+        let interrupted = if let Some(ref mut terminate) = terminate {
             tokio::select! {
-                _ = tokio::signal::ctrl_c() => {},
-                _ = terminate.recv() => {},
+                result = tokio::signal::ctrl_c() => result.is_ok(),
+                signal = terminate.recv() => signal.is_some(),
             }
         } else {
-            let _ = tokio::signal::ctrl_c().await;
-        }
+            tokio::signal::ctrl_c().await.is_ok()
+        };
         #[cfg(not(unix))]
-        let _ = tokio::signal::ctrl_c().await;
-        let _ = tx.send(());
+        let interrupted = tokio::signal::ctrl_c().await.is_ok();
+        if interrupted {
+            let _ = tx.send(());
+        }
     });
     Ok(rx)
 }
