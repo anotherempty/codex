@@ -4,6 +4,12 @@ export type CodexConfigObject = { [key: string]: CodexConfigValue };
 
 export type CodexOptions = {
   codexPathOverride?: string;
+  /**
+   * Experimental: attach exec to an existing local shared app-server socket.
+   * Requires a compatible fork CLI. The server owns credentials/environment.
+   * Supported on Unix only; connection loss does not guarantee cancellation.
+   */
+  appServerSocket?: string;
   baseUrl?: string;
   apiKey?: string;
   /**

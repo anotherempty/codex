@@ -158,3 +158,40 @@ const codex = new Codex({
 
 Raw overrides are applied after structured `config` overrides and take precedence over them. SDK-managed settings, such as
 `baseUrl`, and thread-specific options are applied afterward and take precedence.
+
+### Existing shared app-server (experimental, Unix)
+
+```typescript
+const codex = new Codex({
+  codexPathOverride: "/absolute/path/to/fork/codex",
+  appServerSocket: "/absolute/private/directory/server.sock",
+});
+const thread = codex.startThread({
+  workingDirectory: "/workspace/project",
+  skipGitRepoCheck: true,
+});
+const result = await thread.run("Describe this project.");
+```
+
+This requires this branch's CLI and a separately provisioned compatible local
+app-server. It does not start a daemon or fall back to a private process. Default
+SDK behavior is unchanged when `appServerSocket` is omitted.
+
+The server owns credentials, environment, and launch configuration. Combining
+this option with `env`, `config`, `configOverrides`, `apiKey`, `baseUrl`, or thread
+options implemented as `--config` overrides is rejected. Explicit credential or
+executor environment variables inherited by the CLI are also rejected; unset
+those for this invocation and configure the backend instead. Model, working
+directory, sandbox, images, and output-schema options still use protocol-backed
+thread/turn parameters.
+
+`resumeThread` requires a thread UUID. It submits another turn, so it cannot join
+an already active turn; inspect active work through the app-server API first.
+Requests are not automatically replayed after disconnection.
+
+On Unix, `AbortSignal` and early stream closure send SIGTERM to the CLI, which
+requests interruption of its selected turn. Successful completion closes only
+the client connection. Network loss, SIGKILL, or host failure can leave work
+running; reconnect and inspect before retrying. Windows shared mode is rejected
+because forced child-process termination cannot deliver this cancellation
+contract. The existing private-process mode remains available there.

@@ -24,7 +24,10 @@ parser.add_argument('--codex', required=True, help='Codex executable with app-se
 parser.add_argument('--bridge', required=True, help='Built codex-stdio-to-uds executable')
 parser.add_argument('--python-sdk', action='store_true', help='Also exercise the checkout Python SDK (requires its dependencies)')
 parser.add_argument('--exec', dest='exec_binary', help='Also exercise a built codex-exec shared client')
+parser.add_argument('--typescript-sdk', action='store_true', help='Also exercise the built TypeScript SDK (requires --exec and Node on PATH)')
 args = parser.parse_args()
+if args.typescript_sdk and not args.exec_binary:
+    parser.error('--typescript-sdk requires --exec')
 B = str(pathlib.Path(args.codex).resolve())
 bridge = str(pathlib.Path(args.bridge).resolve())
 gate = threading.Event()
@@ -302,6 +305,50 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
             assert not any(json.loads(line).get('type') == 'turn.completed' for line in output.splitlines())
             gate.set()
             print('PASS: backend loss fails exec without reporting completion or replaying work', flush=True)
+
+            if args.typescript_sdk:
+                launcher = pathlib.Path(tmp, 'exec-cli')
+                launcher.write_text(
+                    '#!' + sys.executable + '\nimport os, sys\n'
+                    "assert sys.argv[1] == 'exec'\n"
+                    + 'os.execv(' + repr(exec_binary) + ', [' + repr(exec_binary) + ', *sys.argv[2:]])\n'
+                )
+                launcher.chmod(0o700)
+                helper = pathlib.Path(__file__).with_name('shared_app_server_typescript_client.mjs')
+
+                def typescript(mode):
+                    process = subprocess.Popen([
+                        'node', str(helper), str(launcher), tmp + '/shared.sock', tmp, mode,
+                    ], env=exec_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                    executions.append(process)
+                    return process
+
+                completed = typescript('complete')
+                output, errors = completed.communicate(timeout=30)
+                assert completed.returncode == 0, (output, errors)
+                assert json.loads(output)['completed']
+                assert servers[0].poll() is None
+                print('PASS: public TypeScript SDK completes through shared exec', flush=True)
+
+                gate.clear()
+                entered.clear()
+                aborted = typescript('abort')
+                assert entered.wait(20), 'TypeScript SDK did not start model request'
+                aborted.send_signal(signal.SIGUSR1)
+                output, errors = aborted.communicate(timeout=30)
+                assert aborted.returncode == 0, (output, errors)
+                result = json.loads(output)
+                assert result['aborted']
+                for _ in range(100):
+                    state = c.rpc('thread/read', {'threadId': result['threadId'], 'includeTurns': True})
+                    if state['result']['thread']['turns'][-1]['status'] == 'interrupted':
+                        break
+                    time.sleep(0.05)
+                else:
+                    raise AssertionError(state)
+                assert servers[0].poll() is None
+                gate.set()
+                print('PASS: TypeScript AbortSignal interrupts its shared turn and preserves daemon', flush=True)
 
         c.process.stdin.close()
         assert c.process.wait(timeout=5) == 0

@@ -363,3 +363,70 @@ describe("CodexExec", () => {
     expect(env).toEqual({ Path: `${pathDir}${path.delimiter}C\\Windows` });
   });
 });
+
+describe("shared app-server selection", () => {
+  const socket = path.join(tmpdir(), "codex-shared-test.sock");
+  const unixIt = process.platform === "win32" ? it.skip : it;
+
+  unixIt(
+    "passes explicit socket and AbortSignal without changing default exec arguments",
+    async () => {
+      const { CodexExec } = await import("../src/exec");
+      spawnMock.mockClear();
+      const child = new FakeChildProcess();
+      spawnMock.mockReturnValue(child as unknown as child_process.ChildProcess);
+      setImmediate(() => {
+        child.stdout.end();
+        child.stderr.end();
+        child.emit("exit", 0, null);
+      });
+      const controller = new AbortController();
+      const exec = new CodexExec("fork-codex", undefined, undefined, undefined, socket);
+      for await (const _ of exec.run({ input: "hi", signal: controller.signal })) {
+        // Drain the process output.
+      }
+      expect(spawnMock.mock.calls[0]?.[1]).toEqual([
+        "exec",
+        "--experimental-json",
+        "--app-server-socket",
+        socket,
+      ]);
+      expect(spawnMock.mock.calls[0]?.[2]?.signal).toBe(controller.signal);
+    },
+  );
+
+  unixIt("rejects ignored environment, credentials and config before spawning", async () => {
+    const { CodexExec } = await import("../src/exec");
+    spawnMock.mockClear();
+    expect(() => new CodexExec("fork", {}, undefined, undefined, socket)).toThrow(/environment/);
+    expect(() => new CodexExec("fork", undefined, {}, undefined, socket)).toThrow(/configuration/);
+    expect(() => new CodexExec("fork", undefined, undefined, [], socket)).toThrow(
+      /configOverrides/,
+    );
+    expect(() => new CodexExec("fork", undefined, undefined, undefined, "relative.sock")).toThrow(
+      /absolute/,
+    );
+    const exec = new CodexExec("fork", undefined, undefined, undefined, socket);
+    for (const options of [
+      { apiKey: "other" },
+      { baseUrl: "http://localhost" },
+      { networkAccessEnabled: false },
+    ]) {
+      await expect(exec.run({ input: "hi", ...options }).next()).rejects.toThrow(/appServerSocket/);
+    }
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it("rejects Windows shared mode rather than losing abort cancellation", async () => {
+    const { CodexExec } = await import("../src/exec");
+    const platform = Object.getOwnPropertyDescriptor(process, "platform")!;
+    Object.defineProperty(process, "platform", { ...platform, value: "win32" });
+    try {
+      expect(() => new CodexExec("fork", undefined, undefined, undefined, socket)).toThrow(
+        /Windows/,
+      );
+    } finally {
+      Object.defineProperty(process, "platform", platform);
+    }
+  });
+});

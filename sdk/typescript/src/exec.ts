@@ -71,13 +71,31 @@ export class CodexExec {
   private envOverride?: Record<string, string>;
   private configOverrides?: CodexConfigObject;
   private rawConfigOverrides?: string[];
+  private appServerSocket?: string;
 
   constructor(
     executablePath: string | null = null,
     env?: Record<string, string>,
     configOverrides?: CodexConfigObject,
     rawConfigOverrides?: string[],
+    appServerSocket?: string,
   ) {
+    if (appServerSocket !== undefined) {
+      if (process.platform === "win32") {
+        throw new Error(
+          "Shared app-server execution is unsupported on Windows: forced termination cannot interrupt the remote turn",
+        );
+      }
+      if (!path.isAbsolute(appServerSocket)) {
+        throw new Error("appServerSocket must be an absolute path");
+      }
+      if (env !== undefined || configOverrides !== undefined || rawConfigOverrides !== undefined) {
+        throw new Error(
+          "appServerSocket uses server configuration and environment; env, config and configOverrides are unsupported",
+        );
+      }
+    }
+    this.appServerSocket = appServerSocket;
     if (executablePath) {
       this.executablePath = executablePath;
       this.pathDirs = [];
@@ -93,6 +111,14 @@ export class CodexExec {
 
   async *run(args: CodexExecArgs): AsyncGenerator<string> {
     const commandArgs: string[] = ["exec", "--experimental-json"];
+    if (this.appServerSocket !== undefined) {
+      commandArgs.push("--app-server-socket", this.appServerSocket);
+      if (args.apiKey !== undefined || args.baseUrl !== undefined) {
+        throw new Error(
+          "appServerSocket uses server credentials and endpoint; apiKey and baseUrl are unsupported",
+        );
+      }
+    }
 
     if (this.configOverrides) {
       for (const override of serializeConfigOverrides(this.configOverrides)) {
@@ -178,6 +204,12 @@ export class CodexExec {
       for (const image of args.images) {
         commandArgs.push("--image", image);
       }
+    }
+
+    if (this.appServerSocket !== undefined && commandArgs.includes("--config")) {
+      throw new Error(
+        "appServerSocket does not support thread options implemented as launch-time config overrides",
+      );
     }
 
     const env: Record<string, string> = {};

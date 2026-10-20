@@ -224,3 +224,25 @@ returns failure and cannot be mistaken for a completed turn.
 thread already has an active turn, the server rejects another start. Clients that
 need to inspect or reattach to that turn should use the app-server API (including
 the Python shared mode) before submitting further work.
+
+## TypeScript SDK shared attachment
+
+`CodexOptions.appServerSocket` forwards an explicit socket to the new `exec` mode.
+It rejects conflicting environment/config/credential options before spawning.
+Windows shared mode is rejected because Node's forced child termination cannot
+provide the Unix SIGTERM-to-turn-interrupt behavior. Defaults remain unchanged.
+
+Validation on Linux: 69 exec library/binary tests, 16 existing private-backend
+resume integration tests, scoped strict exec Clippy, and the CLI compile check
+passed. The TypeScript SDK passed 17 exec unit tests, ESLint, declaration build,
+and TypeScript checking (`--noEmit --rootDir . --allowImportingTsExtensions`,
+which also accommodates the repository's existing sample imports).
+
+The isolated regression script accepts `--exec /path/to/codex-exec` and
+`--typescript-sdk` (build `sdk/typescript` first, with Node on PATH). All 16 checks
+passed with the installed backend and fork-built bridge/exec: these include
+normal shared exec completion, missing-socket failure without fallback, SIGTERM
+interruption, backend-loss failure, public TypeScript SDK completion, and actual
+AbortSignal cancellation verified against server-side turn state. The temporary
+CLI-shaped launcher delegates to the built `codex-exec`; this validates the real
+SDK/exec path without claiming the installed Codex CLI has the new flag.

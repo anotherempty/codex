@@ -13,8 +13,8 @@ export class Codex {
   private options: CodexOptions;
 
   constructor(options: CodexOptions = {}) {
-    const { codexPathOverride, env, config, configOverrides } = options;
-    this.exec = new CodexExec(codexPathOverride, env, config, configOverrides);
+    const { codexPathOverride, env, config, configOverrides, appServerSocket } = options;
+    this.exec = new CodexExec(codexPathOverride, env, config, configOverrides, appServerSocket);
     this.options = options;
   }
 
