@@ -11,17 +11,19 @@ mod event_processor;
 mod event_processor_with_human_output;
 pub(crate) mod event_processor_with_jsonl_output;
 pub(crate) mod exec_events;
+mod shared_server;
 mod worktree;
 
 pub use cli::Cli;
 pub use cli::Command;
 pub use cli::ReviewArgs;
+use codex_app_server_client::AppServerClient;
+use codex_app_server_client::AppServerEvent;
 use codex_app_server_client::DEFAULT_IN_PROCESS_CHANNEL_CAPACITY;
 use codex_app_server_client::EnvironmentManager;
 use codex_app_server_client::ExecServerRuntimeOptions;
 use codex_app_server_client::InProcessAppServerClient;
 use codex_app_server_client::InProcessClientStartArgs;
-use codex_app_server_client::InProcessServerEvent;
 use codex_app_server_client::TypedRequestError;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigWarningNotification;
@@ -219,7 +221,7 @@ impl RequestIdSequencer {
 }
 
 struct ExecRunArgs {
-    in_process_start_args: InProcessClientStartArgs,
+    client_start: shared_server::ClientStart,
     state_db: Option<StateDbHandle>,
     command: Option<ExecCommand>,
     config: Config,
@@ -265,12 +267,14 @@ fn exec_stderr_env_filter() -> EnvFilter {
 }
 
 pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
+    shared_server::validate(&cli)?;
     if let Err(err) = set_default_originator("codex_exec".to_string()) {
         tracing::warn!(?err, "Failed to set codex exec originator override {err:?}");
     }
 
     let Cli {
         mut command,
+        app_server_socket,
         strict_config,
         shared,
         thread_source,
@@ -653,7 +657,8 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
 
     set_default_client_residency_requirement(config.enforce_residency.value());
 
-    if !is_workload_identity_selected()
+    if app_server_socket.is_none()
+        && !is_workload_identity_selected()
         && let Err(err) = enforce_login_restrictions(&config.auth_config()).await
     {
         eprintln!("{err}");
@@ -713,45 +718,54 @@ pub async fn run_main(cli: Cli, arg0_paths: Arg0DispatchPaths) -> anyhow::Result
     let local_runtime_paths = local_runtime_paths.with_allowed_symlinked_codex_home(
         codex_config::allowed_symlinked_codex_home(&config.config_layer_stack, &config.codex_home),
     );
-    let state_db = codex_core::init_state_db(&config).await;
-    let environment_manager = if run_loader_overrides.ignore_user_config {
-        EnvironmentManager::from_env(
-            Some(local_runtime_paths),
-            embedded_network_policy.bind(config.http_client_factory()),
-        )
-        .await?
+    let state_db = if app_server_socket.is_some() {
+        None
     } else {
-        EnvironmentManager::from_codex_home(
-            config.codex_home.clone(),
-            Some(local_runtime_paths),
-            embedded_network_policy.bind(config.http_client_factory()),
-        )
-        .await?
+        codex_core::init_state_db(&config).await
     };
-    let in_process_start_args = InProcessClientStartArgs {
-        arg0_paths,
-        config: std::sync::Arc::new(config.clone()),
-        cli_overrides: run_cli_overrides,
-        loader_overrides: run_loader_overrides,
-        strict_config,
-        cloud_config_bundle: run_cloud_config_bundle,
-        embedded_network_policy,
-        feedback: CodexFeedback::new(),
-        log_db: None,
-        state_db: state_db.clone(),
-        environment_manager: std::sync::Arc::new(environment_manager),
-        config_warnings,
-        session_source: SessionSource::Exec,
-        enable_codex_api_key_env: true,
-        client_name: "codex_exec".to_string(),
-        client_version: env!("CARGO_PKG_VERSION").to_string(),
-        experimental_api: true,
-        mcp_server_openai_form_elicitation: false,
-        opt_out_notification_methods: Vec::new(),
-        channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+    let client_start = if let Some(socket_path) = app_server_socket {
+        shared_server::ClientStart::Shared(socket_path)
+    } else {
+        let environment_manager = if run_loader_overrides.ignore_user_config {
+            EnvironmentManager::from_env(
+                Some(local_runtime_paths),
+                embedded_network_policy.bind(config.http_client_factory()),
+            )
+            .await?
+        } else {
+            EnvironmentManager::from_codex_home(
+                config.codex_home.clone(),
+                Some(local_runtime_paths),
+                embedded_network_policy.bind(config.http_client_factory()),
+            )
+            .await?
+        };
+        let in_process_start_args = InProcessClientStartArgs {
+            arg0_paths,
+            config: std::sync::Arc::new(config.clone()),
+            cli_overrides: run_cli_overrides,
+            loader_overrides: run_loader_overrides,
+            strict_config,
+            cloud_config_bundle: run_cloud_config_bundle,
+            embedded_network_policy,
+            feedback: CodexFeedback::new(),
+            log_db: None,
+            state_db: state_db.clone(),
+            environment_manager: std::sync::Arc::new(environment_manager),
+            config_warnings,
+            session_source: SessionSource::Exec,
+            enable_codex_api_key_env: true,
+            client_name: "codex_exec".to_string(),
+            client_version: env!("CARGO_PKG_VERSION").to_string(),
+            experimental_api: true,
+            mcp_server_openai_form_elicitation: false,
+            opt_out_notification_methods: Vec::new(),
+            channel_capacity: DEFAULT_IN_PROCESS_CHANNEL_CAPACITY,
+        };
+        shared_server::ClientStart::Embedded(Box::new(in_process_start_args))
     };
     run_exec_session(ExecRunArgs {
-        in_process_start_args,
+        client_start,
         state_db,
         command,
         config,
@@ -853,7 +867,7 @@ async fn load_bootstrap_config_or_exit(
 
 async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     let ExecRunArgs {
-        in_process_start_args,
+        client_start,
         state_db,
         command,
         config,
@@ -1019,11 +1033,11 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     let mut request_ids = RequestIdSequencer::new();
-    let mut client = InProcessAppServerClient::start(in_process_start_args)
-        .await
-        .map_err(|err| {
-            anyhow::anyhow!("failed to initialize in-process app-server client: {err}")
-        })?;
+    let shared_backend = matches!(client_start, shared_server::ClientStart::Shared(_));
+    // Register SIGTERM before connecting so SDK cancellation cannot silently
+    // terminate the client after it has submitted a shared-server turn.
+    let mut interrupt_rx = shared_server::interrupt_receiver(shared_backend)?;
+    let mut client = client_start.connect().await?;
 
     let mut daybreak_enabled = config.daybreak_enabled;
     // Resolve resume and fork through existing app-server thread lifecycle APIs.
@@ -1187,14 +1201,9 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 
     info!("Codex initialized with event: {session_configured:?}");
 
-    let (interrupt_tx, mut interrupt_rx) = mpsc::unbounded_channel::<()>();
-    tokio::spawn(async move {
-        if tokio::signal::ctrl_c().await.is_ok() {
-            tracing::debug!("Keyboard interrupt");
-            let _ = interrupt_tx.send(());
-        }
-    });
-
+    if interrupt_rx.try_recv().is_ok() {
+        anyhow::bail!("execution cancelled before submitting a turn");
+    }
     let task_id = match initial_operation {
         InitialOperation::ForkOnly => {
             request_shutdown(&client, &mut request_ids, &primary_thread_id_for_span)
@@ -1331,14 +1340,14 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
         };
 
         let Some(server_event) = server_event else {
-            break;
+            anyhow::bail!("app-server closed before the turn completed");
         };
 
         match server_event {
-            InProcessServerEvent::ServerRequest(request) => {
+            AppServerEvent::ServerRequest(request) => {
                 handle_server_request(&client, *request, &mut error_seen).await;
             }
-            InProcessServerEvent::ServerNotification(notification) => {
+            AppServerEvent::ServerNotification(notification) => {
                 let mut notification = *notification;
                 if let ServerNotification::Error(payload) = &notification {
                     if payload.thread_id == primary_thread_id_for_requests
@@ -1389,7 +1398,10 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                     }
                 }
             }
-            InProcessServerEvent::Lagged { skipped } => {
+            AppServerEvent::Disconnected { message } => {
+                anyhow::bail!("app-server disconnected before the turn completed: {message}");
+            }
+            AppServerEvent::Lagged { skipped } => {
                 let message = lagged_event_warning_message(skipped);
                 warn!("{message}");
                 event_processor.process_warning(message);
@@ -1398,7 +1410,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
     }
 
     if let Err(err) = client.shutdown().await {
-        warn!("in-process app-server shutdown failed: {err}");
+        warn!("app-server client shutdown failed: {err}");
     }
     event_processor.print_final_output();
     if error_seen {
@@ -1409,7 +1421,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
 }
 
 async fn start_thread(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     config: &Config,
     thread_source: &ThreadSource,
@@ -1537,7 +1549,7 @@ fn sandbox_mode_from_permission_profile(
 }
 
 async fn send_request_with_response<T>(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request: ClientRequest,
     method: &str,
 ) -> Result<T, String>
@@ -1736,7 +1748,7 @@ fn should_process_notification(
 
 async fn maybe_backfill_turn_completed_items(
     thread_ephemeral: bool,
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     notification: &mut ServerNotification,
 ) {
@@ -1855,7 +1867,7 @@ fn cwds_match(current_cwd: &Path, session_cwd: &Path) -> bool {
 }
 
 async fn resolve_resume_thread_id(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     config: &Config,
     state_db: Option<&StateDbHandle>,
     args: &crate::cli::ResumeArgs,
@@ -2025,7 +2037,7 @@ fn canceled_mcp_server_elicitation_response(
 }
 
 async fn request_shutdown(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_ids: &mut RequestIdSequencer,
     thread_id: &str,
 ) -> Result<(), String> {
@@ -2041,7 +2053,7 @@ async fn request_shutdown(
 }
 
 async fn resolve_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_id: RequestId,
     value: serde_json::Value,
     method: &str,
@@ -2053,7 +2065,7 @@ async fn resolve_server_request(
 }
 
 async fn reject_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request_id: RequestId,
     method: &str,
     reason: String,
@@ -2084,7 +2096,7 @@ fn server_request_method_name(request: &ServerRequest) -> String {
 }
 
 async fn handle_server_request(
-    client: &InProcessAppServerClient,
+    client: &AppServerClient,
     request: ServerRequest,
     error_seen: &mut bool,
 ) {

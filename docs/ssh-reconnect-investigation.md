@@ -194,3 +194,33 @@ addition to the existing bridge/approval regressions. It uses the installed
 backend and a CLI-shaped launcher for the fork-built standalone bridge, not a
 freshly built complete Codex executable. No real IDE network interruption or
 Windows/macOS runtime check is implied by these Linux results.
+
+## Experimental shared `exec` contract
+
+`codex exec --app-server-socket /absolute/private/server.sock ...` explicitly
+selects an existing local shared app-server. There is no discovery, startup,
+private fallback, reconnect loop, or request replay. Local-socket transport keeps
+file paths on the same execution host. The server must be compatible with this
+CLI and already configured with the intended credentials and executor.
+
+The initial mode supports new turns and `resume <thread-uuid>`. Named lookup,
+`--last`, review, fork, managed worktrees, local providers, profile selection,
+arbitrary CLI config overrides, and ignore-config/rules switches are rejected.
+Those operations need additional shared-backend semantics rather than silent
+reuse of local-only state. Caller workload identity and explicit credential,
+endpoint, or executor environment variables are also rejected. The CLI still
+loads local configuration for existing thread/turn parameters; the shared server
+owns launch configuration and enforces its own restrictions. Provision both with
+compatible settings; this does not transfer per-process environment.
+
+Normal completion unsubscribes the client and closes its connection without
+stopping the backend. A Unix SIGTERM (including a TypeScript AbortSignal) or
+Ctrl-C requests interruption of the selected turn. Forced process termination
+and loss of connectivity cannot guarantee cancellation; the backend may continue
+work, and callers must inspect it through a fresh connection. Transport loss
+returns failure and cannot be mistaken for a completed turn.
+
+`exec resume` submits a new turn; it is not an active-turn event replay API. If the
+thread already has an active turn, the server rejects another start. Clients that
+need to inspect or reattach to that turn should use the app-server API (including
+the Python shared mode) before submitting further work.

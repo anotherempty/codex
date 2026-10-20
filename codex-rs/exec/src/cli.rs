@@ -17,6 +17,11 @@ pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
 
+    /// Attach to an existing local app-server. Uses its credentials and environment.
+    /// Experimental: no private fallback or automatic request replay.
+    #[arg(long, value_name = "PATH", global = true)]
+    pub app_server_socket: Option<PathBuf>,
+
     /// Error out when config.toml contains fields that are not recognized by this version of Codex.
     #[arg(long = "strict-config", global = true, default_value_t = false)]
     pub strict_config: bool,

@@ -13,6 +13,7 @@ import json
 import os
 import pathlib
 import queue
+import signal
 import subprocess
 import tempfile
 import threading
@@ -22,6 +23,7 @@ parser = argparse.ArgumentParser(description='Exercise shared app-server reconne
 parser.add_argument('--codex', required=True, help='Codex executable with app-server Unix socket support')
 parser.add_argument('--bridge', required=True, help='Built codex-stdio-to-uds executable')
 parser.add_argument('--python-sdk', action='store_true', help='Also exercise the checkout Python SDK (requires its dependencies)')
+parser.add_argument('--exec', dest='exec_binary', help='Also exercise a built codex-exec shared client')
 args = parser.parse_args()
 B = str(pathlib.Path(args.codex).resolve())
 bridge = str(pathlib.Path(args.bridge).resolve())
@@ -117,6 +119,7 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
     log = open(tmp + '/server.log', 'w+')
     servers = []
     clients = []
+    executions = []
     try:
         for name in ['shared', 'independent']:
             p = subprocess.Popen([B, 'app-server', '--listen', 'unix://' + tmp + '/' + name + '.sock'], env=env, stdout=log, stderr=log)
@@ -245,6 +248,61 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
         assert replayed["id"] == original["id"], (original, replayed)
         c.send({"id": replayed["id"], "result": {"decision": "decline"}})
         print("PASS: pending approval replayed after abrupt client disconnect", flush=True)
+        if args.exec_binary:
+            exec_binary = str(pathlib.Path(args.exec_binary).resolve())
+            exec_env = env.copy()
+            for key in ['CODEX_API_KEY', 'OPENAI_API_KEY', 'CODEX_EXEC_SERVER_URL', 'OPENAI_BASE_URL']:
+                exec_env.pop(key, None)
+
+            def execute(socket):
+                process = subprocess.Popen([
+                    exec_binary, '--app-server-socket', socket,
+                    '--skip-git-repo-check', '--json', '--cd', tmp, 'exec shared test',
+                ], env=exec_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                executions.append(process)
+                return process
+
+            normal = execute(tmp + '/shared.sock')
+            output, errors = normal.communicate(timeout=30)
+            assert normal.returncode == 0, (output, errors)
+            events = [json.loads(line) for line in output.splitlines()]
+            assert any(e.get('type') == 'turn.completed' for e in events), events
+            assert servers[0].poll() is None
+            print('PASS: shared exec completes without stopping daemon', flush=True)
+
+            missing = execute(tmp + '/missing.sock')
+            output, errors = missing.communicate(timeout=30)
+            assert missing.returncode != 0, (output, errors)
+            assert not any(json.loads(line).get('type') == 'thread.started' for line in output.splitlines())
+            print('PASS: unavailable explicit socket fails without private fallback', flush=True)
+
+            gate.clear()
+            entered.clear()
+            cancelled = execute(tmp + '/shared.sock')
+            assert entered.wait(20), 'exec did not start model request'
+            cancelled.send_signal(signal.SIGTERM)
+            output, errors = cancelled.communicate(timeout=30)
+            assert cancelled.returncode != 0, (output, errors)
+            events = [json.loads(line) for line in output.splitlines()]
+            exec_tid = next(e['thread_id'] for e in events if e.get('type') == 'thread.started')
+            state = c.rpc('thread/read', {'threadId': exec_tid, 'includeTurns': True})
+            assert state['result']['thread']['turns'][-1]['status'] == 'interrupted', state
+            assert servers[0].poll() is None
+            gate.set()
+            print('PASS: shared exec SIGTERM interrupts its turn and preserves daemon', flush=True)
+
+            gate.clear()
+            entered.clear()
+            disconnected = execute(tmp + '/independent.sock')
+            assert entered.wait(20), 'exec did not reach independent backend'
+            servers[1].kill()
+            servers[1].wait(timeout=5)
+            output, errors = disconnected.communicate(timeout=30)
+            assert disconnected.returncode != 0, (output, errors)
+            assert not any(json.loads(line).get('type') == 'turn.completed' for line in output.splitlines())
+            gate.set()
+            print('PASS: backend loss fails exec without reporting completion or replaying work', flush=True)
+
         c.process.stdin.close()
         assert c.process.wait(timeout=5) == 0
         print('PASS: clean stdin EOF detaches bridge without stopping daemon', flush=True)
@@ -255,6 +313,10 @@ with tempfile.TemporaryDirectory(prefix='codex-reconnect-probe-') as tmp:
         raise
     finally:
         gate.set()
+        for execution in executions:
+            if execution.poll() is None:
+                execution.kill()
+                execution.wait(timeout=5)
         for c in clients:
             c.close()
         for p in servers:
