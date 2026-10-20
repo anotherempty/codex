@@ -71,7 +71,7 @@ def messages(process):
         try:
             for line in process.stdout:
                 incoming.put(json.loads(line))
-        except BaseException as error:
+        except (OSError, ValueError) as error:
             incoming.put(error)
         finally:
             incoming.put(None)
